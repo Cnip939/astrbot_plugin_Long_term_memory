@@ -1,0 +1,22 @@
+{
+  "embedding_model": {
+    "description": "嵌入模型名称",
+    "type": "string",
+    "default": ""
+  },
+  "embedding_dim": {
+    "description": "嵌入模型维度",
+    "type": "int",
+    "default": "4096"
+  },
+  "api_key": {
+    "description": "嵌入模型 API 密钥",
+    "type": "string",
+    "default": ""
+  },
+  "api_base_url": {
+    "description": "嵌入模型 API 基础 URL",
+    "type": "string",
+    "default": ""
+  }
+}

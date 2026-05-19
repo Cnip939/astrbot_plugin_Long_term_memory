@@ -1,13 +1,16 @@
 from datetime import datetime
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
+from astrbot.api.provider import ProviderRequest
 from pathlib import Path
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.message_components import Plain, Image
+from astrbot.api.message_components import Plain, Image, At
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+from astrbot.core.agent.message import TextPart 
 import pyarrow as pa
 import lancedb
 import openai
+
 
 
 class MyPlugin(Star):
@@ -46,6 +49,7 @@ class MyPlugin(Star):
                     pa.field("sender", pa.string()),
                     pa.field("id", pa.string()),
                     pa.field("vector", pa.list_(pa.float32(), self.dim)),
+                    pa.field("message", pa.string()),
                 ]
             )
             self.db.create_table("memory", schema=schema)
@@ -87,11 +91,16 @@ class MyPlugin(Star):
     
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def get_message(self, event: AstrMessageEvent):
+        vector = None
         msg_chain = event.get_messages()
         for seg in msg_chain:
             if isinstance(seg, Plain):
                 logger.warning(f"文本: {seg.text}")
                 vector = await self.get_embedding(seg.text)
+
+        if vector is None:
+            logger.warning("没有文本内容或 embedding 失败，跳过存储")
+            return
         
         time = self.simple_time(event.created_at)
         group = event.session_id
@@ -99,16 +108,67 @@ class MyPlugin(Star):
         id = event.get_sender_id()
 
         magical_characters = [
-    {
-        "time": time,
-        "group": group,
-        "sender": sender,
-        "id": id,
-        "vector": vector
-    }
-]
-        
+            {
+                "time": time,
+                "group": group,
+                "sender": sender,
+                "id": id,
+                "vector": vector,
+                "message": seg.text
+            }
+        ]
+            
         self.table.add(magical_characters)
+        logger.warning(f"已存储消息向量,{time},群: {group}, 发送者: {sender}/{id}")
 
-    def bot_memory(self,event: AstrMessageEvent):
-        pass
+    @filter.on_llm_request()
+    async def reply_memory(self,event: AstrMessageEvent,req: ProviderRequest):
+        current_message = event.get_messages()
+        current_message_vector = None
+        texts = []
+        for seg in current_message:
+            if isinstance(seg, Plain):
+                texts.append(seg.text)
+            elif isinstance(seg, At):
+                name = seg.name or str(seg.qq)
+                texts.append(f"[@{name}]")
+            # 其他类型跳过，不要 return
+        
+        full_text = "".join(texts).strip()
+        if not full_text:
+            logger.warning("没有可 embedding 的文本，跳过记忆召回")
+            return
+        
+        logger.warning(f"当前消息文本: {full_text}")
+        current_message_vector = await self.get_embedding(full_text)
+        if current_message_vector is None:
+            return
+        r2 = (
+            self.table.search(current_message_vector)
+            .select(["time", "group", "sender", "id","message"])
+            .limit(15)
+            .to_pandas()
+        )
+        r2 = r2.iloc[1:]                 # ← 从第2行开始取
+        #r2 = r2[r2["_distance"] < 0.75].head(5)
+        logger.warning(f"召回 {len(r2)} 条历史记忆")
+        logger.warning(r2.to_string()) 
+
+        current_group = event.session_id
+        memory_texts = []
+        for _, row in r2.iterrows():
+            group_str = str(row["group"])
+            # 如果是当前群，加上标记
+            if group_str == current_group:
+                group_str += "<-这是本群"
+            
+            memory_texts.append(
+                f"[{row['time']}] 群：{group_str} {row['sender']}({row['id']}): {row['message']}"
+            )
+        memory_block = "\n".join(memory_texts)
+        
+        prefix = f"【以下是你回忆起的对话片段，按照时间越近与相关性越高从上往下排序，你可以使用他们辅助进行回复】\n{memory_block}\n\n"
+        req.extra_user_content_parts.append(
+            TextPart(text=prefix).mark_as_temp()
+        )
+        logger.warning(req)

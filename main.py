@@ -59,6 +59,8 @@ class MyPlugin(Star):
         
         self.table = self.db.open_table("memory")
 
+            # ========== 原消息存储与向量查询 ==========
+
     def _ensure_client(self):
         """懒加载：第一次用到时才创建 client"""
         if self._openai_client is not None:
@@ -172,3 +174,76 @@ class MyPlugin(Star):
             TextPart(text=prefix).mark_as_temp()
         )
         logger.warning(req)
+
+            # ==========    关系图谱    ==========
+            
+            
+            
+            # ========== 人格画像与好感度 ==========
+
+    
+    
+            # ========== AI 自主调用工具 ==========
+
+    @filter.llm_tool(name="query_memory")
+    async def query_memory(self, event: AstrMessageEvent, query: str, limit: int = 5) -> str:
+        '''查询长期记忆数据库，回忆过去群聊或用户相关的历史信息。
+        Args:
+            query(string): 查询意图描述或关键词，用于语义相似度匹配。
+            limit(number): 返回条数上限，默认5条，最多10条。
+        '''
+        vector = await self.get_embedding(query)
+        if not vector:
+            return "[记忆查询失败] embedding 服务不可用"
+
+        try:
+            # 多取一条防意外，但返回时按用户要的 limit
+            df = (
+                self.table.search(vector)
+                .select(["time", "group", "sender", "id", "message"])
+                .limit(min(limit, 10) + 1)
+                .to_pandas()
+            )
+            if df.empty:
+                return "[记忆查询] 未找到相关记忆"
+
+            texts = []
+            for _, row in df.head(limit).iterrows():
+                group_str = str(row["group"])
+                if group_str == event.session_id:
+                    group_str += "<-当前群"
+                texts.append(
+                    f"[{row['time']}] 群:{group_str} {row['sender']}({row['id']}): {row['message']}"
+                )
+            return "【查询到的历史记忆】\n" + "\n".join(texts)
+        except Exception as e:
+            logger.error(f"query_memory tool 出错: {e}")
+            return f"[记忆查询错误] {e}"
+
+    @filter.llm_tool(name="write_memory")
+    async def write_memory(self, event: AstrMessageEvent, content: str) -> str:
+        '''将重要信息主动写入长期记忆数据库。
+        当用户明确表达偏好、身份、重要约定、关键事实，或你意识到"这件事以后可能有用"时使用。
+        Args:
+            content(string): 需要记忆的文本内容，建议简洁准确，去除口语化冗余。
+        '''
+        vector = await self.get_embedding(content)
+        if not vector:
+            return "[记忆写入失败] embedding 服务不可用"
+
+        try:
+            time_str = self.simple_time(datetime.now().timestamp())
+            record = {
+                "time": time_str,
+                "group": event.session_id,
+                "sender": "你自己",
+                "id": str(event.get_sender_id()),
+                "vector": vector,
+                "message": content,
+            }
+            self.table.add([record])
+            logger.warning(f"AI_TOOL 写入记忆: {content[:60]}")
+            return f"[记忆已写入] {time_str} | {content[:100]}"
+        except Exception as e:
+            logger.error(f"write_memory tool 出错: {e}")
+            return f"[记忆写入错误] {e}"

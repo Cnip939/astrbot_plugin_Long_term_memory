@@ -8,6 +8,7 @@ from astrbot.api.message_components import Plain, Image, At
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.agent.message import TextPart 
 import pyarrow as pa
+import pandas as pd
 import lancedb
 import openai
 
@@ -148,13 +149,19 @@ class MyPlugin(Star):
         r2 = (
             self.table.search(current_message_vector)
             .select(["time", "group", "sender", "id","message"])
-            .limit(15)
+            .limit(8)
             .to_pandas()
         )
         r2 = r2.iloc[1:]                 # ← 从第2行开始取
         #r2 = r2[r2["_distance"] < 0.75].head(5)
-        logger.warning(f"召回 {len(r2)} 条历史记忆")
-        logger.warning(r2.to_string()) 
+        r2 = self._filter_duplicate_messages(r2) 
+        r2 = r2[r2["message"].astype(str).str.len() > 3]
+        logger.warning(r2) 
+
+        
+        if r2.empty:
+            return "[记忆查询] 未找到相关记忆"
+
 
         current_group = event.session_id
         memory_texts = []
@@ -168,16 +175,40 @@ class MyPlugin(Star):
                 f"[{row['time']}] 群：{group_str} {row['sender']}({row['id']}): {row['message']}"
             )
         memory_block = "\n".join(memory_texts)
+        logger.warning(memory_block) 
         
-        prefix = f"【以下是你回忆起的对话片段，按照时间越近与相关性越高从上往下排序，你可以使用他们辅助进行回复】\n{memory_block}\n\n"
+        prefix = f"【以下是你回忆起的对话片段，按照时间越近与相关性越高从上往下排序，你可以使用他们辅助进行回复，不过可能很多垃圾信息，可以随时使用记忆功能的工具来搜索记忆】\n{memory_block}\n\n"
         req.extra_user_content_parts.append(
             TextPart(text=prefix).mark_as_temp()
         )
         logger.warning(req)
 
+    def _filter_duplicate_messages(self, df):
+        """过滤内容完全重复的消息，保留每组的第一条和最后一条，保持原始召回顺序。"""
+        if df.empty or "message" not in df.columns:
+            return df
+        
+        # 标记所有重复内容（包括第一次出现）
+        dup_mask = df["message"].duplicated(keep=False)
+        unique_df = df[~dup_mask]          # 不重复的全保留
+        dup_df = df[dup_mask]              # 重复的单独处理
+        
+        if dup_df.empty:
+            return df
+        
+        def keep_first_last(group):
+            # 组内 ≤2 条全保留；>2 条只保留首尾
+            return group if len(group) <= 2 else group.iloc[[0, -1]]
+        
+        # group_keys=False 避免多级索引；sort=False 保持 LanceDB 召回的原始相似度顺序
+        dup_filtered = dup_df.groupby("message", group_keys=False, sort=False).apply(keep_first_last)
+        
+        # 按原始索引排序，恢复顺序
+        return pd.concat([unique_df, dup_filtered]).sort_index()
+
             # ==========    关系图谱    ==========
             
-            
+
             
             # ========== 人格画像与好感度 ==========
 
